@@ -1,21 +1,18 @@
 const urlInput = document.getElementById('url');
+const selectorInput = document.getElementById('selector');
 const captureBtn = document.getElementById('capture');
 const statusEl = document.getElementById('status');
 
-// 恢复上次的 URL
-chrome.storage.local.get('figmaUrl', ({ figmaUrl }) => {
-  if (figmaUrl) urlInput.value = figmaUrl;
+// 恢复上次的值
+chrome.storage.local.get(['figmaUrl', 'selector'], (data) => {
+  if (data.figmaUrl) urlInput.value = data.figmaUrl;
+  if (data.selector) selectorInput.value = data.selector;
 });
 
 function parseFileKey(url) {
-  // figma.com/design/:fileKey/...
-  // figma.com/file/:fileKey/...
-  // figma.com/board/:fileKey/...
-  // figma.com/make/:fileKey/...
-  // 也支持 branch: figma.com/design/:fileKey/branch/:branchKey/...
   const m = url.match(/figma\.com\/(?:design|file|board|make)\/([a-zA-Z0-9]+)(?:\/branch\/([a-zA-Z0-9]+))?/);
   if (!m) return null;
-  return m[2] || m[1]; // branch key 优先
+  return m[2] || m[1];
 }
 
 function showStatus(msg) {
@@ -26,19 +23,16 @@ function showStatus(msg) {
 captureBtn.addEventListener('click', async () => {
   const url = urlInput.value.trim();
   const fileKey = parseFileKey(url);
-  if (!fileKey) {
-    showStatus('Invalid Figma URL');
-    return;
-  }
+  if (!fileKey) { showStatus('Invalid Figma URL'); return; }
 
-  // 保存 URL
-  chrome.storage.local.set({ figmaUrl: url });
+  const selector = selectorInput.value.trim() || 'body';
+
+  chrome.storage.local.set({ figmaUrl: url, selector });
 
   captureBtn.disabled = true;
   showStatus('Getting captureId...');
 
-  // 发消息给 background
-  chrome.runtime.sendMessage({ action: 'capture', fileKey }, (resp) => {
+  chrome.runtime.sendMessage({ action: 'capture', fileKey, selector }, (resp) => {
     if (resp?.error) {
       showStatus('Error: ' + resp.error);
       captureBtn.disabled = false;

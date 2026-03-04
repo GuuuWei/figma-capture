@@ -17,6 +17,9 @@
   <label>Figma URL</label>
   <input id="url" type="text" placeholder="https://www.figma.com/design/FILE_KEY/..." />
   <div class="hint">粘贴 Figma 文件链接，自动提取 fileKey</div>
+  <label style="margin-top: 12px;">Selector</label>
+  <input id="selector" type="text" placeholder="body" />
+  <div class="hint">CSS 选择器，缩小捕获范围（如 .main, #app）</div>
   <button id="capture">Capture to Figma</button>
   <div id="status" class="status"></div>
   <script src="popup.js"></script>
