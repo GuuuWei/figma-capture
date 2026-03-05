@@ -1,27 +1,55 @@
 # Figma Capture
 
-Chrome extension to capture any webpage into a Figma file, bypassing CSP restrictions.
+Chrome extension that captures any webpage into Figma's clipboard format via [HTML to Design](https://www.figma.com/community/plugin/1159123024924461424). Click the icon, then paste into Figma.
+
+This extension adds a **post-processing layer** on top of Figma's official `capture.js` — it intercepts the clipboard payload and applies font fixes and DOM cleanup before it reaches Figma.
+
+## What it does
+
+- **CJK font fix** — Detects Chinese/Japanese/Korean text and remaps fonts to `PingFang SC` / `Noto Serif SC` so glyphs render correctly in Figma
+- **Font mapping** — Remaps unavailable fonts to Figma-compatible equivalents via a user-configurable `font-map.json` (see `font-map.example.json`)
+- **Default font fallback** — Assigns `Noto Sans SC` to elements without explicit `fontFamily`, preventing Figma's Times fallback
+- **DOM flattening** — Removes pass-through wrapper `<div>`/`<span>` elements that add noise without visual contribution
+- **Empty frame cleanup** — Strips zero-size childless elements and bubbles up removal of non-decorative empty containers
 
 ## Setup
 
-1. Build (downloads `capture.js` from Figma):
+1. Download `capture.js` from Figma:
    ```
    make
    ```
-2. Go to `chrome://extensions`, enable Developer mode
-3. Click "Load unpacked" and select this directory
+2. Copy the font mapping example and customize as needed:
+   ```
+   cp font-map.example.json font-map.json
+   ```
+3. Go to `chrome://extensions`, enable **Developer mode**
+4. Click **Load unpacked** and select this directory
 
 ## Usage
 
 1. Navigate to the page you want to capture
 2. Click the extension icon
-3. Paste a Figma file URL (e.g. `https://www.figma.com/design/FILE_KEY/...`)
-4. Click "Capture to Figma"
-
-The URL is remembered for next time. The captured content appears in the target Figma file.
+3. Switch to Figma and **Ctrl/Cmd+V** to paste
 
 ## How it works
 
-- `chrome.scripting.executeScript` with `files` + `world: 'MAIN'` injects `capture.js` directly into the page context, bypassing Content Security Policy
-- Background service worker fetches `captureId` from Figma's API (also CSP-exempt)
-- `capture.js` serializes the DOM (computed styles, images, fonts) and POSTs to Figma
+1. `capture.js` (Figma's official script) serializes the DOM — computed styles, images, layout — into a JSON payload and writes it to the clipboard
+2. `background.js` installs a clipboard interceptor (`navigator.clipboard.write` / `writeText`) that transforms the payload before it's written:
+   - Font correction (CJK, icon fonts, font mapping)
+   - Whitespace/empty node cleanup
+   - Wrapper flattening (promotes single children of non-decorative same-size containers)
+3. The result is a cleaner, more accurate Figma paste
+
+## Disclaimer
+
+This is an **unofficial community tool** for personal and educational use. It is not affiliated with, endorsed by, or supported by Figma, Inc.
+
+- `capture.js` is downloaded at build time from Figma's public endpoint and is **not included** in this repository. It is subject to [Figma's Terms of Service](https://www.figma.com/tos/). Figma may change or remove this endpoint at any time, which could break the build or alter capture behavior.
+- This extension only performs **local, client-side transformations** on clipboard data. It does not collect, transmit, or store any user data.
+- The font names referenced (PingFang SC, Noto Sans SC, Google Sans Flex, etc.) are trademarks of their respective owners.
+- This tool depends on Figma's HTML-to-Design clipboard format, which is undocumented and may change without notice. **No guarantee of continued functionality.**
+- Use at your own risk. The authors are not responsible for any issues arising from the use of this tool.
+
+## License
+
+MIT

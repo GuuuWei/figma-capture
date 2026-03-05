@@ -11,6 +11,10 @@
     "48": "icon48.png",
     "128": "icon128.png"
   },
+  "web_accessible_resources": [{
+    "resources": ["font-map.json"],
+    "matches": ["<all_urls>"]
+  }],
   "action": {
     "default_title": "Capture to Figma",
     "default_icon": {

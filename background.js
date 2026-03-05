@@ -1,6 +1,18 @@
 // 点击图标 → 注入拦截器 + capture.js → 自动剪贴板捕获（不发送）
 chrome.action.onClicked.addListener(async (tab) => {
   try {
+    // 0. 读取字体映射表并注入到页面
+    let fontMap = {};
+    try {
+      const resp = await fetch(chrome.runtime.getURL('font-map.json'));
+      fontMap = await resp.json();
+    } catch {}
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (map) => { window.__FONT_MAP = map; },
+      args: [fontMap],
+      world: 'MAIN'
+    });
     // 1. 注入拦截器（修改剪贴板 payload 的字体+扁平化）
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
@@ -62,6 +74,8 @@ function installFontInterceptor() {
     return isSerif(ff) ? 'Noto Serif SC' : 'PingFang SC';
   }
 
+  const FONT_MAP = window.__FONT_MAP || {};
+
   function fixFont(node) {
     if (!node || typeof node !== 'object') return;
     if (node.nodeType === 3) return;
@@ -72,7 +86,13 @@ function installFontInterceptor() {
       }
 
       const ff = node.styles?.fontFamily;
-      if (!ff) return;
+
+      // No fontFamily: assign default to avoid Figma Times fallback
+      if (!ff) {
+        if (!node.styles) node.styles = {};
+        node.styles.fontFamily = 'Noto Sans SC';
+        return;
+      }
 
       // Already has CJK font
       if (/PingFang|Noto (Sans|Serif) SC/i.test(ff)) return;
@@ -90,6 +110,20 @@ function installFontInterceptor() {
       if (text && CJK_RE.test(text)) {
         if (!node.styles) node.styles = {};
         node.styles.fontFamily = cjkFont(ff);
+      }
+
+      // Apply font mapping last — remap to Figma-available font names
+      const cur = node.styles?.fontFamily;
+      if (cur) {
+        const mapped = cur.split(',')
+          .map(f => {
+            const trimmed = f.trim().replace(/^["']|["']$/g, '');
+            return FONT_MAP[trimmed] || f.trim();
+          })
+          .join(', ');
+        if (mapped !== cur) {
+          node.styles.fontFamily = mapped;
+        }
       }
     }
   }
@@ -231,16 +265,25 @@ function installFontInterceptor() {
         return true;
       });
 
-      // Remove zero-size empty element nodes (no children, tiny rect)
+      // Remove empty element nodes (no children, small rect, no decoration, not self-rendering tag)
+      const SELF_RENDERING = new Set(['IMG', 'SVG', 'VIDEO', 'CANVAS', 'INPUT', 'TEXTAREA', 'SELECT', 'IFRAME', 'HR']);
       node.childNodes = node.childNodes.filter(child => {
         if (child.nodeType === 1) {
           const r = child.rect;
+          const tag = (child.tag || '').toUpperCase();
           const hasChildren = Array.isArray(child.childNodes) && child.childNodes.length > 0;
-          if (!hasChildren && r && r.width < 1 && r.height < 1) return false;
-          if (!hasChildren && r && (r.height < 0.01)) return false;
+          if (!hasChildren && !SELF_RENDERING.has(tag) && !hasDecoration(child) && r && (r.width < 1 || r.height < 1)) return false;
         }
         return true;
       });
+
+      // Bubble up: non-decorative, non-self-rendering container with zero children → remove
+      if (node.childNodes.length === 0) {
+        const tag = (node.tag || '').toUpperCase();
+        if (!SELF_RENDERING.has(tag) && !hasDecoration(node)) {
+          return null;
+        }
+      }
     }
     return node;
   }
