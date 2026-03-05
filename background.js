@@ -1,34 +1,33 @@
 // 点击图标 → 注入拦截器 + capture.js → 自动剪贴板捕获（不发送）
 chrome.action.onClicked.addListener(async (tab) => {
-  // 1. 注入拦截器（修改剪贴板 payload 的字体+扁平化）
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: installFontInterceptor,
-    world: 'MAIN'
-  });
-  // 2. 注入 capture.js
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    files: ['capture.js'],
-    world: 'MAIN'
-  });
-  // 3. 触发剪贴板捕获（不传 endpoint → 只复制不发送）
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: () => {
-      window.figma.captureForDesign({ selector: 'body' });
-    },
-    world: 'MAIN'
-  });
+  try {
+    // 1. 注入拦截器（修改剪贴板 payload 的字体+扁平化）
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: installFontInterceptor,
+      world: 'MAIN'
+    });
+    // 2. 注入 capture.js
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['capture.js'],
+      world: 'MAIN'
+    });
+    // 3. 触发剪贴板捕获（不传 endpoint → 只复制不发送）
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        window.figma.captureForDesign({ selector: 'body' });
+      },
+      world: 'MAIN'
+    });
+  } catch (e) {
+    console.warn('[figma-capture] inject failed:', e.message);
+  }
 });
 
-// 拦截 fetch，修改发给 Figma 的 payload（字体修正 + DOM 扁平化，不改网页）
+// 拦截剪贴板写入，修改 payload（字体修正 + DOM 扁平化，不改网页）
 function installFontInterceptor() {
-  const SYSTEM_ALIASES = new Set([
-    '-apple-system', 'BlinkMacSystemFont', 'system-ui',
-    'Segoe UI', 'Roboto', 'Helvetica Neue', 'Helvetica', 'Arial',
-    'sans-serif', 'serif', 'monospace', 'cursive', 'fantasy',
-  ]);
   const CJK_RE = /[\u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/;
   const ICON_RE = /Material|Symbol|Icon|FontAwesome|fa-/i;
   const SERIF_FONTS = new Set([
@@ -97,7 +96,7 @@ function installFontInterceptor() {
 
   // --- Phase 3: Flatten pass-through wrappers (bottom-up) ---
 
-  const TRANSPARENT_RE = /transparent|rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\)/i;
+  const TRANSPARENT_RE = /transparent|rgba\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0(\.0+)?\s*\)/i;
   const ZERO_BORDER_RE = /^0(px)?\b/;
 
   function isVisibleBg(v) {
@@ -117,9 +116,16 @@ function installFontInterceptor() {
     const s = node.styles || {};
     // Background
     if (isVisibleBg(s.backgroundColor) || isVisibleBg(s.background) || isVisibleBg(s.backgroundImage)) return true;
-    // Border (any side)
+    // Border — shorthand and longhand (computed styles use longhand)
     for (const key of ['border', 'borderTop', 'borderRight', 'borderBottom', 'borderLeft']) {
       if (isVisibleBorder(s[key])) return true;
+    }
+    for (const side of ['Top', 'Right', 'Bottom', 'Left']) {
+      const w = s[`border${side}Width`];
+      if (w && w !== '0' && w !== '0px') {
+        const c = s[`border${side}Color`];
+        if (c && !TRANSPARENT_RE.test(c)) return true;
+      }
     }
     // Shadow, outline
     for (const key of ['boxShadow', 'outline']) {
