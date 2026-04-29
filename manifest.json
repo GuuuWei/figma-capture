@@ -27,5 +27,11 @@
       "48": "icon48.png",
       "128": "icon128.png"
     }
+  },
+  "commands": {
+    "capture": {
+      "suggested_key": { "default": "Alt+Shift+F" },
+      "description": "Capture to Figma"
+    }
   }
 }
