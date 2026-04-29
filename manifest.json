@@ -2,10 +2,15 @@
   "manifest_version": 3,
   "name": "Figma Capture",
   "description": "Capture webpages to Figma with CJK font fix and DOM optimization",
-  "version": "1.1",
+  "version": "1.2",
   "permissions": ["activeTab", "scripting"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["bridge.js"],
+    "run_at": "document_start"
+  }],
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",

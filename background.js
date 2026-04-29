@@ -1,3 +1,32 @@
+// 跨域图片代理：background 不受 CORS 限制
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type !== 'fetch-image') return false;
+
+  (async () => {
+    try {
+      const resp = await fetch(message.url);
+      if (!resp.ok) {
+        sendResponse({ error: `HTTP ${resp.status}` });
+        return;
+      }
+      const blob = await resp.blob();
+      const reader = new FileReader();
+      const base64 = await new Promise((resolve, reject) => {
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+      });
+      const mimeType = blob.type;
+      const base64Data = base64.split(',')[1];
+      sendResponse({ base64: base64Data, mimeType });
+    } catch (e) {
+      sendResponse({ error: e.message });
+    }
+  })();
+
+  return true;
+});
+
 // 点击图标 → 注入拦截器 + capture.js → 自动剪贴板捕获（不发送）
 chrome.action.onClicked.addListener(async (tab) => {
   try {
@@ -13,19 +42,30 @@ chrome.action.onClicked.addListener(async (tab) => {
       args: [fontMap],
       world: 'MAIN'
     });
-    // 1. 注入拦截器（修改剪贴板 payload 的字体+扁平化）
+    // 1. 注入 bridge.js（ISOLATED world，确保已打开的标签页也有中转层）
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['bridge.js']
+    });
+    // 2. SVG <use> 内联（在 capture.js 之前，修改 live DOM）
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: inlineSvgUse,
+      world: 'MAIN'
+    });
+    // 3. 注入拦截器（修改剪贴板 payload 的字体+扁平化+fetch 代理）
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: installFontInterceptor,
       world: 'MAIN'
     });
-    // 2. 注入 capture.js
+    // 4. 注入 capture.js
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       files: ['capture.js'],
       world: 'MAIN'
     });
-    // 3. 触发剪贴板捕获（不传 endpoint → 只复制不发送）
+    // 5. 触发剪贴板捕获（不传 endpoint → 只复制不发送）
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
@@ -288,11 +328,88 @@ function installFontInterceptor() {
     return node;
   }
 
+  // --- SVG <use> inlining (in serialized payload) ---
+
+  const XLINK_NS = 'http://www.w3.org/1999/xlink';
+
+  function fixSvgUses(node) {
+    if (!node || typeof node !== 'object' || node.nodeType !== 1) return;
+    if (Array.isArray(node.childNodes)) {
+      node.childNodes.forEach(fixSvgUses);
+    }
+    if (!node.content || typeof node.content !== 'string') return;
+    if (!node.content.includes('<use')) return;
+
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(node.content, 'image/svg+xml');
+    const svg = doc.documentElement;
+    if (svg.querySelector('parsererror')) return;
+
+    let modified = false;
+    let maxPasses = 5;
+    while (maxPasses-- > 0) {
+      const uses = svg.querySelectorAll('use');
+      if (uses.length === 0) break;
+      let replaced = 0;
+      for (const use of uses) {
+        const href = use.getAttribute('href')
+          || use.getAttributeNS(XLINK_NS, 'href')
+          || '';
+        if (!href.includes('#')) continue;
+        const id = href.split('#')[1];
+        if (!id) continue;
+
+        const symbol = document.getElementById(id);
+        if (!symbol) continue;
+
+        const symbolViewBox = symbol.getAttribute('viewBox');
+        if (symbolViewBox && !svg.getAttribute('viewBox')) {
+          svg.setAttribute('viewBox', symbolViewBox);
+        }
+
+        const g = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
+
+        const ux = use.getAttribute('x');
+        const uy = use.getAttribute('y');
+        const ut = use.getAttribute('transform');
+        if ((ux && ux !== '0') || (uy && uy !== '0')) {
+          const tx = ux || '0';
+          const ty = uy || '0';
+          g.setAttribute('transform', `translate(${tx}, ${ty})${ut ? ' ' + ut : ''}`);
+        } else if (ut) {
+          g.setAttribute('transform', ut);
+        }
+
+        for (const child of symbol.childNodes) {
+          g.appendChild(doc.importNode(child, true));
+        }
+
+        const SKIP = new Set(['href', 'xlink:href', 'x', 'y', 'width', 'height', 'transform']);
+        for (const attr of use.attributes) {
+          if (SKIP.has(attr.name)) continue;
+          if (!g.hasAttribute(attr.name)) {
+            g.setAttribute(attr.name, attr.value);
+          }
+        }
+
+        use.replaceWith(g);
+        replaced++;
+        modified = true;
+      }
+      if (replaced === 0) break;
+    }
+
+    if (modified) {
+      node.content = new XMLSerializer().serializeToString(svg);
+      console.log('[figma-capture] inlined SVG <use> in payload');
+    }
+  }
+
   // --- Transform pipeline ---
 
   function transformPayload(root) {
     fixFont(root);
-    // Multiple passes: cleanup may expose new flatten opportunities
+    fixSvgUses(root);
     for (let i = 0; i < 3; i++) {
       cleanupNodes(root);
       phase3Flatten(root);
@@ -303,6 +420,71 @@ function installFontInterceptor() {
   // Guard against double install
   if (window.__figmaCaptureInterceptor) return;
   window.__figmaCaptureInterceptor = true;
+
+  // --- Fetch interceptor: proxy cross-origin image requests via background ---
+
+  let fetchReqId = 0;
+  const pendingFetches = new Map();
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    if (event.data?.type !== '__figma_capture_fetch_response') return;
+
+    const { requestId, base64, mimeType, error } = event.data;
+    const pending = pendingFetches.get(requestId);
+    if (!pending) return;
+    pendingFetches.delete(requestId);
+
+    if (error || !base64) {
+      console.warn('[figma-capture] proxy fetch failed:', error || 'empty response');
+      pending.reject(new Error(error || 'empty response'));
+    } else {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: mimeType || 'image/png' });
+      console.log('[figma-capture] proxy fetch OK:', bytes.length, 'bytes', mimeType);
+      pending.resolve(new Response(blob, {
+        status: 200,
+        headers: { 'Content-Type': mimeType || 'image/png' }
+      }));
+    }
+  });
+
+  function proxyFetch(url) {
+    return new Promise((resolve, reject) => {
+      const requestId = ++fetchReqId;
+      pendingFetches.set(requestId, { resolve, reject });
+      window.postMessage({ type: '__figma_capture_fetch', url, requestId }, '*');
+      setTimeout(() => {
+        if (pendingFetches.has(requestId)) {
+          pendingFetches.delete(requestId);
+          reject(new Error('proxy fetch timeout'));
+        }
+      }, 30000);
+    });
+  }
+
+  function isSameOrigin(url) {
+    try {
+      return new URL(url, window.location.href).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  const origFetch = window.fetch;
+  window.fetch = function(input, init) {
+    const url = typeof input === 'string' ? input : input?.url;
+    if (url && !isSameOrigin(url) && !url.startsWith('data:') && !url.startsWith('blob:')
+        && (!init || Object.keys(init).length === 0)) {
+      console.log('[figma-capture] proxying cross-origin fetch:', url);
+      return proxyFetch(url);
+    }
+    return origFetch.apply(this, arguments);
+  };
 
   // --- Clipboard interceptor ---
 
@@ -389,5 +571,88 @@ function installFontInterceptor() {
   };
 
   console.log('[figma-capture] interceptor v3 installed');
+}
+
+function inlineSvgUse() {
+  const XLINK_NS = 'http://www.w3.org/1999/xlink';
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+
+  function getUseHref(use) {
+    return use.getAttribute('href')
+      || use.getAttributeNS(XLINK_NS, 'href')
+      || '';
+  }
+
+  function resolveSymbol(href) {
+    if (!href || !href.includes('#')) return null;
+    const id = href.split('#')[1];
+    if (!id) return null;
+    return document.getElementById(id);
+  }
+
+  function inlineUseElements(root) {
+    let total = 0;
+    let maxPasses = 5;
+    while (maxPasses-- > 0) {
+      const uses = root.querySelectorAll('use');
+      let replaced = 0;
+      for (const use of uses) {
+        const href = getUseHref(use);
+        const symbol = resolveSymbol(href);
+        if (!symbol) continue;
+
+        const svg = use.closest('svg');
+        if (!svg) continue;
+
+        const symbolViewBox = symbol.getAttribute('viewBox');
+        if (symbolViewBox && !svg.getAttribute('viewBox')) {
+          svg.setAttribute('viewBox', symbolViewBox);
+        }
+
+        const g = document.createElementNS(SVG_NS, 'g');
+
+        const ux = use.getAttribute('x');
+        const uy = use.getAttribute('y');
+        const ut = use.getAttribute('transform');
+        if ((ux && ux !== '0') || (uy && uy !== '0')) {
+          const tx = ux || '0';
+          const ty = uy || '0';
+          g.setAttribute('transform', `translate(${tx}, ${ty})${ut ? ' ' + ut : ''}`);
+        } else if (ut) {
+          g.setAttribute('transform', ut);
+        }
+
+        for (const child of symbol.childNodes) {
+          g.appendChild(child.cloneNode(true));
+        }
+
+        const SKIP_ATTRS = new Set(['href', 'xlink:href', 'x', 'y', 'width', 'height', 'transform']);
+        for (const attr of use.attributes) {
+          if (SKIP_ATTRS.has(attr.name)) continue;
+          if (!g.hasAttribute(attr.name)) {
+            g.setAttribute(attr.name, attr.value);
+          }
+        }
+
+        use.replaceWith(g);
+        replaced++;
+      }
+      total += replaced;
+      if (replaced === 0) break;
+    }
+    return total;
+  }
+
+  let inlined = inlineUseElements(document);
+
+  for (const el of document.querySelectorAll('*')) {
+    if (el.shadowRoot) {
+      inlined += inlineUseElements(el.shadowRoot);
+    }
+  }
+
+  if (inlined > 0) {
+    console.log(`[figma-capture] inlined ${inlined} SVG <use> references`);
+  }
 }
 
