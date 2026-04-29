@@ -80,49 +80,11 @@ async function captureTab(tab) {
       files: ['capture.js'],
       world: 'MAIN'
     });
-    // 3. 显示选择工具栏
+    // 5. 触发剪贴板捕获（不传 endpoint → 只复制不发送）
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       func: () => {
-        const { showClipboardBar } = window.figma.__clipboardFlow('body');
-        showClipboardBar();
-      },
-      world: 'MAIN'
-    });
-    // 4. 阻止工具栏影响宿主页面
-    //    window 捕获阶段拦截 → 用 shadowRoot.elementFromPoint 找到真实目标 → 重新分发
-    await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      func: () => {
-        if (window.__figmaToolbarShield) return;
-        window.__figmaToolbarShield = true;
-        let cachedHost = null;
-        for (const type of ['click', 'mousedown', 'mouseup', 'pointerdown', 'pointerup']) {
-          window.addEventListener(type, (e) => {
-            if (e._t) return;
-            if (!cachedHost || !cachedHost.isConnected)
-              cachedHost = document.getElementById('__figma_capture_toolbar_host__');
-            if (!cachedHost || !cachedHost.__sr) return;
-            const path = e.composedPath();
-            if (!path.includes(cachedHost)) return;
-            e.stopPropagation();
-            e.preventDefault();
-            const real = cachedHost.__sr.elementFromPoint(e.clientX, e.clientY);
-            if (!real) return;
-            const C = (e instanceof PointerEvent) ? PointerEvent : MouseEvent;
-            const re = new C(type, {
-              bubbles: true, composed: false, cancelable: true,
-              detail: e.detail,
-              screenX: e.screenX, screenY: e.screenY,
-              clientX: e.clientX, clientY: e.clientY,
-              button: e.button, buttons: e.buttons,
-              ctrlKey: e.ctrlKey, shiftKey: e.shiftKey,
-              altKey: e.altKey, metaKey: e.metaKey,
-            });
-            re._t = true;
-            real.dispatchEvent(re);
-          }, true);
-        }
+        window.figma.captureForDesign({ selector: 'body' });
       },
       world: 'MAIN'
     });
